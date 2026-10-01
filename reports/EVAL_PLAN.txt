@@ -1,0 +1,198 @@
+# RokoSMS Evaluation Plan
+
+Written BEFORE training. Do not change it after seeing results
+unless I add a dated note explaining why.
+
+## Goal
+
+Catch scam messages. Missing a scam is worse than a false alarm.
+
+## Main metric
+
+Recall on the scam class (Labels = 1).
+
+## Safety rule
+
+Precision on the scam class must stay at or above 0.90.
+A model that fails this rule cannot win, even with high recall.
+
+## Other numbers I will report
+
+* F2 score
+* PR-AUC
+* Confusion matrix
+* All numbers shown separately for real messages and synthetic messages
+
+## How the data is used
+
+* Train set: fitting the model, and cross-validation (grouped by template\_key).
+* Dev set: quick checks while building. Not for final claims.
+* Gold set (from Google Form, real messages only): used ONCE at the very end.
+
+## Threshold rule
+
+The decision threshold is chosen using cross-validation on the train set.
+It is NOT tuned on the dev set (too small, 218 rows).
+
+## Known warning
+
+Dev scores will look better than real life, because the data is
+template-like. Never quote dev scores as real-world performance.
+
+
+
+
+
+\## Note 1: Phone-number shortcut (28 Sep 2026)
+
+In the train set, no legit message has a phone number, but 57% of real
+
+phishing and 76% of synthetic phishing do. All phone numbers have 10 digits.
+
+The model could use this as a shortcut.
+
+Rule: every model is trained and scored two ways: normal, and with phone
+
+numbers removed. If the score drops a lot when phones are removed, the
+
+model was leaning on the shortcut.
+
+
+## Note 2: Model choice (28 Sep 2026)
+Chosen model: LinearSVC.
+Reason: recall barely changes when phone numbers are removed (1.0 to 0.991),
+while XGBoost drops more (0.930 to 0.861). LinearSVC relies less on the
+phone-number shortcut.
+Decision: the model is trained and used on phone-masked text from here on,
+not normal text. This removes the shortcut instead of hoping the model
+avoids it.
+
+
+## Note 3: Known blind spot — link-based phishing (28 Sep 2026)
+LinearSVC (phone-masked) missed 1 dev message: an English-only, link-based
+"card deactivation" phishing text (bit.ly link, no Roman Urdu, no phone
+number). Root cause: fewer than 5% of phishing training messages contain
+a URL at all, so the model has little to learn this pattern from.
+Decision: don't patch with more synthetic link examples now. Instead,
+Step 16's URL-mismatch checker (comparing claimed brand vs. actual domain)
+is the intended defense against this pattern, as a separate signal
+alongside the ML model's prediction.
+
+
+## Note 4: Round-trip mismatch root cause identified (28 Sep 2026)
+The 8 round-trip mismatches are synthetic, not real. Root cause: some
+templates phrase things ("code", "Transaction {NUM}") without the exact
+keyword templatize() looks for ("security code", "transaction id/number").
+The unfilled placeholder ({OTP}, {TRXID}) never triggers the regex, so it
+stays put in the stored key, but the FILLED digit doesn't get recognized
+the same way, becoming {NUM} on recompute.
+Impact: none on training or splitting -- grouping uses the key from the
+unfilled template consistently across all fills, so no leakage occurs.
+This only affects the internal audit check, not the data itself.
+
+
+## Note 5: Threshold chosen (28 Sep 2026)
+Tuned via 5-fold grouped cross-validation on train (never dev), using
+the calibrated LinearSVC model's probability scores.
+
+Threshold = 0.30
+Recall: 1.000
+Precision: 0.963
+
+Not the mathematically top pick (0.15 gave the same recall at 0.933
+precision) -- 0.15 sits too close to the 0.90 precision floor. Since train
+is templated and easier than real messages will be, some margin is needed
+in case real precision comes in lower than this table shows.
+
+
+## Note 6: Tuning attempts, Step 11 (28 Sep 2026)
+Tried, one at a time, via 5-fold grouped CV on train:
+- word n-grams (1,2) vs (1,3): no improvement, precision slightly worse
+- C = 0.5 / 1.0 / 2.0: coefficients differ (confirmed via inspection) but
+  scores are identical to several decimal places -- no prediction near
+  the decision boundary flips at these settings
+- min_df = 1 / 2 / 3: negligible movement (~0.001), within noise
+Decision: keep original settings. Data appears to be the limiting factor,
+not model configuration -- further tuning here isn't worth pursuing.
+
+
+## Note 7: Final model chosen (28 Sep 2026)
+Model: LinearSVC (class_weight="balanced", default settings)
+Text: phone-masked
+Calibration: CalibratedClassifierCV, sigmoid, cv=5
+Threshold: 0.30
+CV (train): recall 0.995, precision 0.994
+Dev: recall 1.000, precision 1.000
+Known limitation: all metrics inflated by templated data. Gold-set
+evaluation (Step 18-19) is the only true measure, pending more real
+Google Form submissions (17 collected as of this note).
+
+
+## Note 8: SHAP explainer (28 Sep 2026)
+explain_message() trains a separate plain LinearSVC (same hyperparameters,
+same phone-masked text) purely for explanations, since SHAP works on one
+model, not CalibratedClassifierCV's internal 5-fold average.
+Bug found and fixed: shap_values() returns a value for every vocabulary
+word, not just words present in the message -- baseline attribution can
+give nonzero-looking values to absent words. Fixed by filtering to only
+features with nonzero TF-IDF in the specific message being explained.
+Known cosmetic issue (not fixed here, deferred to Step 15/predict.py):
+overlapping n-gram fragments (e.g. "bit", "bit ly", "ly" from one URL)
+show up as separate, redundant-looking entries. Needs de-duplication at
+the presentation layer, not here.
+
+
+## Note 9: "to" investigated, not a bug (28 Sep 2026)
+Found while reviewing SHAP explanations: word__to has a notable positive
+(phishing-leaning) SHAP value. Investigated by reading actual messages.
+Finding: "to" in this data serves two roles -- Roman Urdu discourse word
+("...nahi tha to...", meaning "then") and English preposition in
+call-to-action phrasing ("to verify", "to restore access"). Both uses
+skew toward phishing (100 vs 32 legit), likely because phishing messages
+lean on conditional/threat phrasing ("if X then Y bad thing") far more
+than legit notification-style messages do.
+Decision: not treated as a shortcut to patch. Unlike the phone-number
+and English-phishing gaps, this has a plausible real-world semantic
+reason, not just a data-generation artifact. Revisit only if gold-set
+data shows it causing real false positives.
+
+
+## Note 10: URL-mismatch checker — substring bug found and fixed (28 Sep 2026)
+Initial version compared domains via substring check
+(`official_domain not in actual_domain`). This failed on lookalike
+domains like hbl.com.fake-login.info, which contains "hbl.com" as a
+fake subdomain prefix but is actually controlled by fake-login.info.
+The bug caused mismatch=False (falsely "safe") on an obvious scam URL.
+Fixed using tldextract to compare true registered domains (domain +
+real suffix, correctly handling multi-part suffixes like .com.pk)
+instead of substring matching. Re-verified: genuine domain passes,
+lookalike is caught, no-URL messages still skip cleanly.
+
+
+## Note 11: Gold-set evaluation, FINAL (29 Sep 2026)
+Ran once, as committed, on 17 real Google Form submissions (16 scam, 1
+legit -- heavily skewed toward scam since people are far more motivated
+to report scams than routine legit texts).
+
+Recall (scam class): 15/16 = 0.938
+Precision: not computable -- only 1 legit example, statistically
+meaningless with n=1.
+
+Two errors:
+1. Missed scam (prob 0.034): a fabricated "money received" notification
+   with no threat/urgency/link -- structurally identical to a real
+   deposit notification. The deception is in the fabricated fact, not
+   the wording, which is undetectable from text alone.
+2. False positive on the 1 legit message (prob 0.729): a passport
+   dispatch notice, an entirely new category not present in training
+   (no bank/OTP/wallet category covers government document pickup).
+
+Per EVAL_PLAN.md's commitment, no retuning or retraining was done based
+on this result. These two patterns (fabricated factual-tone scams;
+unfamiliar legit categories like government notices) are documented here
+as known gaps for future work, not patched under deadline pressure.
+
+CAVEAT: n=17 is far too small for a statistically confident estimate.
+This is a first real-world signal, not a final verdict. A 95% confidence
+interval on 15/16 is roughly 70%-100% -- wide enough that this number
+should be reported as directional, not definitive.

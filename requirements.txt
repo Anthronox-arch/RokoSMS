@@ -1,0 +1,11 @@
+pandas
+scikit-learn
+xgboost
+shap
+joblib
+pytest
+streamlit
+requests
+tldextract
+fastapi
+uvicorn
