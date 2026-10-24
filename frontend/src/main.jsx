@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import { Analytics } from '@vercel/analytics/react'
 import {
   AlertTriangle,
   Check,
@@ -402,4 +403,9 @@ function App() {
   )
 }
 
-createRoot(document.getElementById('root')).render(<App />)
+createRoot(document.getElementById('root')).render(
+  <>
+    <App />
+    <Analytics />
+  </>
+)
